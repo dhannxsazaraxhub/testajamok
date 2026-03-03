@@ -1,3 +1,12 @@
+-- =========================================================
+-- ULTRA SMART AUTO KATA - WindUI Build v5.9
+-- by dhann x sazaraaax
+-- Fix: auto join meja, AFK Hop persist state, auto save cfg
+-- =========================================================
+
+-- ══════════════════════════════════════════════════════════
+-- SECTION 1 : LOGGER
+-- ══════════════════════════════════════════════════════════
 local logBuffer    = {}
 local MAX_LOGS     = 80
 local logParagraph = nil
@@ -130,6 +139,7 @@ local cfg = {
     autoClickDelay  = 1.5,
     -- auto join
     autoJoin        = false,
+    tableMode       = "Semua",  -- "Semua" | "2P" | "4P" | "8P"
     -- afk hop
     afkHop          = false,
     afkHopTimeout   = 15,
@@ -928,7 +938,7 @@ end
 local function startAutoJoin()
     stopAutoJoin()
     autoJoinEnabled = true
-    log("AUTOJOIN","Loop dimulai")
+    log("AUTOJOIN","Loop dimulai | mode="..cfg.tableMode)
 
     autoJoinThread = task.spawn(function()
         while autoJoinEnabled and _G.AutoKataActive do
@@ -946,28 +956,38 @@ local function startAutoJoin()
 
                 local tf = Workspace:FindFirstChild("Tables"); if not tf then return end
 
-                -- Scan meja: cari yang:
-                -- 1. Punya ProximityPrompt aktif (masih bisa join)
-                -- 2. Ada minimal 1 SeatWeld (ada player duduk di sana)
-                -- 3. Masih ada kursi kosong (total seat > filled seat)
-                -- Prioritas: 8P > 4P > 2P, lalu yang paling banyak SeatWeld (paling ramai)
+                -- Tentukan prioritas berdasarkan tableMode
+                -- Format nama meja: Table_2P_1, Table_4P_2, Table_8P, dst
+                local priorities
+                if cfg.tableMode == "2P" then
+                    priorities = {"2P"}
+                elseif cfg.tableMode == "4P" then
+                    priorities = {"4P"}
+                elseif cfg.tableMode == "8P" then
+                    priorities = {"8P"}
+                else
+                    -- "Semua": prioritas 8P > 4P > 2P
+                    priorities = {"8P","4P","2P"}
+                end
+
                 local bestModel  = nil
                 local bestFilled = -1
                 local bestPrompt = nil
 
-                for _, pri in ipairs({"8P","4P","2P"}) do
+                for _, pri in ipairs(priorities) do
                     for _, model in ipairs(tf:GetChildren()) do
-                        if model:IsA("Model") and model.Name:find(pri) then
-                            local prompt  = findActivePrompt(model)
+                        -- Cocokkan nama: Table_4P_1, Table_4P, Table_4P_2, dll
+                        -- Gunakan pattern "_XP" agar tidak salah match (misal 2P tidak match 4P)
+                        if model:IsA("Model") and model.Name:match("_"..pri) then
+                            local prompt = findActivePrompt(model)
                             if prompt then
                                 local filled = countFilledSeats(model)
                                 local total  = countTotalSeats(model)
 
-                                -- Harus ada player (SeatWeld >= 1) dan masih ada slot kosong
+                                -- Ada player (SeatWeld ≥ 1) dan masih ada kursi kosong
                                 if filled >= 1 and filled < total then
                                     log("AUTOJOIN","Kandidat:", model.Name,
-                                        "filled="..filled, "total="..total)
-                                    -- Pilih yang paling ramai
+                                        "filled="..filled.."/"..total)
                                     if filled > bestFilled then
                                         bestModel  = model
                                         bestFilled = filled
@@ -990,7 +1010,7 @@ local function startAutoJoin()
                         log("AUTOJOIN","Gagal duduk di:", bestModel.Name)
                     end
                 else
-                    log("AUTOJOIN","Tidak ada meja valid (perlu ProximityPrompt + SeatWeld)")
+                    log("AUTOJOIN","Tidak ada meja ["..cfg.tableMode.."] valid (ProximityPrompt + SeatWeld)")
                 end
             end)
             task.wait(SCAN_INTERVAL)
@@ -1353,7 +1373,7 @@ local function refreshCfgSummary()
             "Max Length  : " .. cfg.maxLength,
             "Auto        : " .. (cfg.autoEnabled  and "ON" or "OFF"),
             "AutoClick   : " .. (cfg.autoClick    and "ON" or "OFF"),
-            "AutoJoin    : " .. (cfg.autoJoin     and "ON" or "OFF"),
+            "AutoJoin    : " .. (cfg.autoJoin     and "ON" or "OFF") .. " [" .. cfg.tableMode .. "]",
             "AFK Hop     : " .. (cfg.afkHop       and "ON" or "OFF"),
             "Hop Timeout : " .. cfg.afkHopTimeout .. "s",
         }, "\n"))
@@ -1417,6 +1437,25 @@ SettingsTab:Paragraph({
     Desc  = "Otomatis join meja saat ada slot. Setting ini di-save dan otomatis aktif saat execute ulang."
 })
 
+SettingsTab:Dropdown({
+    Title = "Pilih Tipe Meja",
+    Desc  = "Meja berapa player yang mau di-join. 'Semua' = prioritas 8P > 4P > 2P",
+    Icon  = "layout",
+    Values = {"Semua","2P","4P","8P"},
+    Value  = cfg.tableMode,
+    Multi  = false,
+    Callback = function(sel)
+        if not sel then return end
+        cfg.tableMode = sel
+        notify("[MEJA]", "Mode: "..sel, 2)
+        saveConfig()
+        -- Restart loop jika sedang aktif agar langsung pakai mode baru
+        if autoJoinEnabled then
+            startAutoJoin()
+        end
+    end,
+})
+
 uiAutoJoinToggle = SettingsTab:Toggle({
     Title = "Auto Join Table",
     Desc  = "Otomatis join meja siap main (2P/4P/8P)",
@@ -1424,7 +1463,7 @@ uiAutoJoinToggle = SettingsTab:Toggle({
     Value = cfg.autoJoin,
     Callback = function(v)
         cfg.autoJoin = v
-        if v then startAutoJoin(); notify("[AUTO JOIN]","Aktif",2)
+        if v then startAutoJoin(); notify("[AUTO JOIN]","Aktif – mode "..cfg.tableMode,2)
         else stopAutoJoin(); notify("[AUTO JOIN]","Nonaktif",2) end
         saveConfig()
     end,
@@ -1607,8 +1646,8 @@ end
 -- ══════════════════════════════════════════════════════════
 local AboutTab = Window:Tab({ Title = "About", Icon = "info" })
 AboutTab:Paragraph({
-    Title = "Auto Kata v5.8",
-    Desc  = "by dhann x sazaraaax\nAuto play, ranking kata, auto save config\nAuto Join: SeatWeld + ProximityPrompt detection",
+    Title = "Auto Kata v5.9",
+    Desc  = "by dhann x sazaraaax\nAuto play, ranking kata, auto save config\nAuto Join: pilih tipe meja 2P/4P/8P + SeatWeld detection",
 })
 AboutTab:Paragraph({
     Title = "Cara Pakai",
@@ -1775,7 +1814,7 @@ task.delay(0.5, function()
 end)
 
 log("BOOT","════════════════════════════════════")
-log("BOOT","AutoKata v5.8 loaded OK")
+log("BOOT","AutoKata v5.9 loaded OK")
 log("BOOT","Wordlist:", cfg.activeWordlist, "|", #kataModule, "kata")
 log("BOOT","VIM="..tostring(VIM~=nil).." | keypress="..tostring(keypress~=nil))
 log("BOOT","autoEnabled="..tostring(cfg.autoEnabled).." | autoJoin="..tostring(cfg.autoJoin).." | afkHop="..tostring(cfg.afkHop))
