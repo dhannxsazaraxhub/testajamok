@@ -1,12 +1,3 @@
--- =========================================================
--- ULTRA SMART AUTO KATA - WindUI Build v5.7
--- by dhann x sazaraaax
--- Fix: auto join meja, AFK Hop persist state, auto save cfg
--- =========================================================
-
--- ══════════════════════════════════════════════════════════
--- SECTION 1 : LOGGER
--- ══════════════════════════════════════════════════════════
 local logBuffer    = {}
 local MAX_LOGS     = 80
 local logParagraph = nil
@@ -833,28 +824,6 @@ local afkHopHopping  = false
 
 -- ---------- helper seat / table ----------
 
-local function getTableType(name)
-    if name:find("2P") then return 2, 2
-    elseif name:find("4P") then return 4, 3
-    elseif name:find("8P") then return 8, 4 end
-    return nil, nil
-end
-
--- Hitung berapa seat yang terisi oleh player sungguhan (bukan NPC)
-local function getOccupiedByPlayers(model)
-    local sf = model:FindFirstChild("Seats"); if not sf then return 0 end
-    local n = 0
-    for _, seat in ipairs(sf:GetChildren()) do
-        if seat:IsA("Seat") and seat.Occupant then
-            local char = seat.Occupant.Parent
-            if char and Players:GetPlayerFromCharacter(char) then
-                n = n + 1
-            end
-        end
-    end
-    return n
-end
-
 local function getHumanoid()
     local char = LocalPlayer.Character
     if not char then return nil end
@@ -870,25 +839,38 @@ local function leaveSeat()
     if h and h.SeatPart then pcall(function() h.Sit = false end) end
 end
 
--- Cari ProximityPrompt dari model meja yang masih aktif/enabled
--- Game biasanya disable atau hapus prompt saat meja tidak bisa di-join
+-- Hitung berapa seat yang terisi (ada SeatWeld di dalam Seat)
+local function countFilledSeats(model)
+    local sf = model:FindFirstChild("Seats"); if not sf then return 0 end
+    local n = 0
+    for _, seat in ipairs(sf:GetChildren()) do
+        if seat:IsA("Seat") and seat:FindFirstChild("SeatWeld") then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- Hitung total seat di meja
+local function countTotalSeats(model)
+    local sf = model:FindFirstChild("Seats"); if not sf then return 0 end
+    local n = 0
+    for _, seat in ipairs(sf:GetChildren()) do
+        if seat:IsA("Seat") then n = n + 1 end
+    end
+    return n
+end
+
+-- Cari ProximityPrompt aktif di meja (ada = meja masih bisa join)
 local function findActivePrompt(model)
     for _, d in ipairs(model:GetDescendants()) do
-        if d:IsA("ProximityPrompt") and d.Enabled then
-            return d
-        end
+        if d:IsA("ProximityPrompt") and d.Enabled then return d end
     end
     return nil
 end
 
--- Fire prompt tanpa teleport — hanya jika prompt masih ada dan aktif
-local function pressPrompt(model)
-    local prompt = findActivePrompt(model)
-    if not prompt then
-        log("AUTOJOIN","Tidak ada ProximityPrompt aktif di:", model.Name)
-        return false
-    end
-
+-- Fire prompt — tidak ada teleport, langsung fire
+local function pressPrompt(model, prompt)
     log("AUTOJOIN","Fire prompt:", model.Name, "|", prompt:GetFullName())
 
     if fireproximityprompt then
@@ -899,13 +881,12 @@ local function pressPrompt(model)
         pcall(function() prompt:InputHoldEnd() end)
     end
 
-    -- Tunggu konfirmasi duduk (max 2.5 detik)
+    -- Tunggu konfirmasi duduk max 2.5 detik
     local t = 0
     while t < 2.5 do
         task.wait(0.1); t = t + 0.1
         if isSeated() then return true end
     end
-
     return false
 end
 
@@ -952,7 +933,7 @@ local function startAutoJoin()
     autoJoinThread = task.spawn(function()
         while autoJoinEnabled and _G.AutoKataActive do
             pcall(function()
-                -- Sudah ada meja target: cek apakah masih duduk
+                -- Sudah duduk: cek apakah masih valid
                 if currentJoinTable then
                     if not isSeated() then
                         log("AUTOJOIN","Keluar dari meja, reset target")
@@ -961,44 +942,55 @@ local function startAutoJoin()
                     return
                 end
 
-                -- Sudah duduk (dari luar, misalnya join manual), biarkan
                 if isSeated() then return end
 
                 local tf = Workspace:FindFirstChild("Tables"); if not tf then return end
 
-                -- Scan semua meja: cari yang ProximityPrompt-nya masih aktif
-                -- Prioritas: 8P > 4P > 2P, lalu yang paling banyak playernya
-                local bestModel, bestOcc = nil, -1
+                -- Scan meja: cari yang:
+                -- 1. Punya ProximityPrompt aktif (masih bisa join)
+                -- 2. Ada minimal 1 SeatWeld (ada player duduk di sana)
+                -- 3. Masih ada kursi kosong (total seat > filled seat)
+                -- Prioritas: 8P > 4P > 2P, lalu yang paling banyak SeatWeld (paling ramai)
+                local bestModel  = nil
+                local bestFilled = -1
+                local bestPrompt = nil
 
                 for _, pri in ipairs({"8P","4P","2P"}) do
                     for _, model in ipairs(tf:GetChildren()) do
                         if model:IsA("Model") and model.Name:find(pri) then
-                            -- Cek apakah meja ini masih punya ProximityPrompt aktif
-                            local prompt = findActivePrompt(model)
+                            local prompt  = findActivePrompt(model)
                             if prompt then
-                                local occ = getOccupiedByPlayers(model)
-                                -- Pilih meja yang paling ramai (lebih mungkin ada match)
-                                if occ > bestOcc then
-                                    bestModel = model
-                                    bestOcc   = occ
+                                local filled = countFilledSeats(model)
+                                local total  = countTotalSeats(model)
+
+                                -- Harus ada player (SeatWeld >= 1) dan masih ada slot kosong
+                                if filled >= 1 and filled < total then
+                                    log("AUTOJOIN","Kandidat:", model.Name,
+                                        "filled="..filled, "total="..total)
+                                    -- Pilih yang paling ramai
+                                    if filled > bestFilled then
+                                        bestModel  = model
+                                        bestFilled = filled
+                                        bestPrompt = prompt
+                                    end
                                 end
                             end
                         end
                     end
-                    if bestModel then break end -- stop di prioritas tertinggi yang ada
+                    if bestModel then break end
                 end
 
                 if bestModel then
-                    log("AUTOJOIN","Target:", bestModel.Name, "occ="..bestOcc)
-                    local ok = pressPrompt(bestModel)
+                    log("AUTOJOIN","Join:", bestModel.Name, "filled="..bestFilled)
+                    local ok = pressPrompt(bestModel, bestPrompt)
                     if ok then
                         currentJoinTable = bestModel.Name
                         log("AUTOJOIN","Berhasil duduk di:", bestModel.Name)
                     else
-                        log("AUTOJOIN","Gagal duduk di:", bestModel.Name, "- prompt mungkin hilang, retry...")
+                        log("AUTOJOIN","Gagal duduk di:", bestModel.Name)
                     end
                 else
-                    log("AUTOJOIN","Tidak ada meja dengan prompt aktif, menunggu...")
+                    log("AUTOJOIN","Tidak ada meja valid (perlu ProximityPrompt + SeatWeld)")
                 end
             end)
             task.wait(SCAN_INTERVAL)
@@ -1615,8 +1607,8 @@ end
 -- ══════════════════════════════════════════════════════════
 local AboutTab = Window:Tab({ Title = "About", Icon = "info" })
 AboutTab:Paragraph({
-    Title = "Auto Kata v5.7",
-    Desc  = "by dhann x sazaraaax\nAuto play, ranking kata, auto save config\nAuto Join: scan meja yang masih ada ProximityPrompt aktif",
+    Title = "Auto Kata v5.8",
+    Desc  = "by dhann x sazaraaax\nAuto play, ranking kata, auto save config\nAuto Join: SeatWeld + ProximityPrompt detection",
 })
 AboutTab:Paragraph({
     Title = "Cara Pakai",
@@ -1783,7 +1775,7 @@ task.delay(0.5, function()
 end)
 
 log("BOOT","════════════════════════════════════")
-log("BOOT","AutoKata v5.7 loaded OK")
+log("BOOT","AutoKata v5.8 loaded OK")
 log("BOOT","Wordlist:", cfg.activeWordlist, "|", #kataModule, "kata")
 log("BOOT","VIM="..tostring(VIM~=nil).." | keypress="..tostring(keypress~=nil))
 log("BOOT","autoEnabled="..tostring(cfg.autoEnabled).." | autoJoin="..tostring(cfg.autoJoin).." | afkHop="..tostring(cfg.afkHop))
